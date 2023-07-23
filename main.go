@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"github.com/application-research/whypfs-core"
-	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	dsync "github.com/ipfs/go-datastore/sync"
@@ -59,16 +58,16 @@ func main() {
 			fmt.Printf("Error decoding cid: %s\n", err)
 			return
 		}
-		nodeBlock, errN := blocks.NewBlockWithCid(cidD.Bytes(), cidD)
-		if errN != nil {
-			fmt.Printf("Error creating block: %s\n", errN)
-			return
-		}
-		errNb := node.Blockstore.Put(context.Background(), nodeBlock)
-		if errNb != nil {
-			fmt.Printf("Error putting block: %s\n", errNb)
-			return
-		}
+		//nodeBlock, errN := blocks.NewBlockWithCid(cidD.Bytes(), cidD)
+		//if errN != nil {
+		//	fmt.Printf("Error creating block: %s\n", errN)
+		//	return
+		//}
+		//errNb := node.Blockstore.Put(context.Background(), nodeBlock)
+		//if errNb != nil {
+		//	fmt.Printf("Error putting block: %s\n", errNb)
+		//	return
+		//}
 
 		// fetch
 		fmt.Println("Fetching CID: ", cidItem)
