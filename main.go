@@ -10,7 +10,9 @@ import (
 	dsync "github.com/ipfs/go-datastore/sync"
 	"io/ioutil"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 const baseURL = "https://bafybeifcghbafml4yrk43m3pvplin4auibnwrdv5v3rnwnovjjpkt6tkju.ipfs.dweb.link/"
@@ -51,36 +53,59 @@ func main() {
 	}
 
 	fmt.Println("List of CIDs:")
+	// Number of concurrent goroutines based on the number of CPUs available
+	concurrentLimit := runtime.NumCPU()
+
+	// Assuming you have a list of CIDs to fetch
+	//cids := []string{"cid1", "cid2", "cid3", "cid4", "cid5"}
+
+	// Create a channel to receive errors from goroutines
+	results := make(chan error)
+
+	// Create a WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+
+	// Create a semaphore channel to limit the number of goroutines
+	sem := make(chan struct{}, concurrentLimit)
+
+	// Launch goroutines
 	for _, cidItem := range cids {
-		fmt.Println(cidItem)
-		cidD, err := cid.Decode(cidItem)
-		if err != nil {
-			fmt.Printf("Error decoding cid: %s\n", err)
-			return
-		}
-		//nodeBlock, errN := blocks.NewBlockWithCid(cidD.Bytes(), cidD)
-		//if errN != nil {
-		//	fmt.Printf("Error creating block: %s\n", errN)
-		//	return
-		//}
-		//errNb := node.Blockstore.Put(context.Background(), nodeBlock)
-		//if errNb != nil {
-		//	fmt.Printf("Error putting block: %s\n", errNb)
-		//	return
-		//}
-
-		// fetch
-		fmt.Println("Fetching CID: ", cidItem)
-		_, errF := node.Get(context.Background(), cidD)
-		if errF != nil {
-			fmt.Printf("Error fetching CID: %s\n", errF)
-			return
-		}
-
-		fmt.Println("Fetched CID: ", cidItem)
-
+		wg.Add(1)
+		go fetchCID(cidItem, node, results, &wg, sem)
 	}
 
+	// Wait for all goroutines to finish
+	wg.Wait()
+	close(results)
+
+	// Collect errors from the results channel
+	for err := range results {
+		if err != nil {
+			fmt.Printf("Error fetching CID: %s\n", err)
+		}
+	}
+
+}
+
+func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.WaitGroup, sem chan struct{}) {
+	defer wg.Done()
+
+	// Acquire the semaphore, this will block if the semaphore is full
+	sem <- struct{}{}
+	defer func() {
+		// Release the semaphore after finishing the work
+		<-sem
+	}()
+
+	fmt.Println("Fetching CID: ", cidItem)
+	cidD, err := cid.Decode(cidItem)
+	if err != nil {
+		results <- fmt.Errorf("Error decoding cid: %s", err)
+		return
+	}
+
+	_, errF := node.Get(context.Background(), cidD)
+	results <- errF
 }
 
 func NewEdgeNode(ctx context.Context, repo string) (*whypfs.Node, error) {
