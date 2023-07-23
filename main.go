@@ -72,7 +72,7 @@ func main() {
 
 		// fetch
 		fmt.Println("Fetching CID: ", cidItem)
-		_, errF := node.Blockstore.Get(context.Background(), cidD)
+		_, errF := node.Get(context.Background(), cidD)
 		if errF != nil {
 			fmt.Printf("Error fetching CID: %s\n", errF)
 			return
