@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/application-research/whypfs-core"
+	"github.com/cheggaaa/pb/v3"
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	dsync "github.com/ipfs/go-datastore/sync"
@@ -56,9 +57,6 @@ func main() {
 	// Number of concurrent goroutines based on the number of CPUs available
 	concurrentLimit := runtime.NumCPU()
 
-	// Assuming you have a list of CIDs to fetch
-	//cids := []string{"cid1", "cid2", "cid3", "cid4", "cid5"}
-
 	// Create a channel to receive errors from goroutines
 	results := make(chan error)
 
@@ -68,10 +66,19 @@ func main() {
 	// Create a semaphore channel to limit the number of goroutines
 	sem := make(chan struct{}, concurrentLimit)
 
+	// Create a map to store the progress bars for each CID
+	bars := make(map[string]*pb.ProgressBar)
+
 	// Launch goroutines
 	for _, cidItem := range cids {
 		wg.Add(1)
-		go fetchCID(cidItem, node, results, &wg, sem)
+		// Create a progress bar for each CID
+		bar := pb.New(100)
+		bar.SetWidth(80)
+		bar.Set(pb.Bytes, true)
+		bar.Start()
+		bars[cidItem] = bar
+		go fetchCID(cidItem, node, results, &wg, sem, bars[cidItem])
 	}
 
 	// Wait for all goroutines to finish
@@ -84,10 +91,9 @@ func main() {
 			fmt.Printf("Error fetching CID: %s\n", err)
 		}
 	}
-
 }
 
-func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.WaitGroup, sem chan struct{}) {
+func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.WaitGroup, sem chan struct{}, bar *pb.ProgressBar) {
 	defer wg.Done()
 
 	// Acquire the semaphore, this will block if the semaphore is full
@@ -105,6 +111,10 @@ func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.
 	}
 
 	_, errF := node.Get(context.Background(), cidD)
+
+	// Increment the progress bar
+	bar.Increment()
+
 	results <- errF
 }
 
