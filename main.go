@@ -24,7 +24,7 @@ func main() {
 	// Parse the command-line flags.
 	flag.Parse()
 
-	resp, err := http.Get(cidsUrlSource)
+	resp, err := http.Get(*cidsUrlSource)
 	if err != nil {
 		fmt.Printf("An error occurred while fetching cids.txt: %s\n", err)
 		return
