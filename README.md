@@ -12,6 +12,7 @@ Fetch a list of CIDs (Content Identifier) from a specific URL and download the c
   
 ## Install
 ```
+go mod tidy
 go build -o addc
 ```
 
