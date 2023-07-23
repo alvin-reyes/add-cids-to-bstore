@@ -64,9 +64,24 @@ func main() {
 			fmt.Printf("Error creating block: %s\n", errN)
 			return
 		}
-		node.Blockstore.Put(context.Background(), nodeBlock)
+		errNb := node.Blockstore.Put(context.Background(), nodeBlock)
+		if errNb != nil {
+			fmt.Printf("Error putting block: %s\n", errNb)
+			return
+		}
+
+		// fetch
+		fmt.Println("Fetching CID: ", cidItem)
+		_, errF := node.Blockstore.Get(context.Background(), cidD)
+		if errF != nil {
+			fmt.Printf("Error fetching CID: %s\n", errF)
+			return
+		}
+
+		fmt.Println("Fetched CID: ", cidItem)
 
 	}
+
 }
 
 func NewEdgeNode(ctx context.Context, repo string) (*whypfs.Node, error) {
