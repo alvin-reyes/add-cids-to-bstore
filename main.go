@@ -57,6 +57,12 @@ func main() {
 	// Number of concurrent goroutines based on the number of CPUs available
 	concurrentLimit := runtime.NumCPU()
 
+	// Calculate the batch size per CPU
+	batchSizePerCPU := len(cids) / concurrentLimit
+	if batchSizePerCPU == 0 {
+		batchSizePerCPU = 1 // Ensure there's at least one CID per batch
+	}
+
 	// Create a channel to receive errors from goroutines
 	results := make(chan error)
 
@@ -69,20 +75,36 @@ func main() {
 	// Create a map to store the progress bars for each CID
 	bars := make(map[string]*pb.ProgressBar)
 
-	// Launch goroutines
-	for _, cidItem := range cids {
-		wg.Add(1)
-		// Create a progress bar for each CID
-		bar := pb.New(100)
-		bar.SetWidth(80)
-		bar.Set(pb.Bytes, true)
-		bar.Start()
-		bars[cidItem] = bar
-		go fetchCID(cidItem, node, results, &wg, sem, bars[cidItem])
+	// Divide the CIDs into batches
+	fmt.Println("Dividing CIDs into batches")
+	fmt.Println("Batch size per CPU: ", batchSizePerCPU)
+	fmt.Println("Total number of batches: ", len(cids)/batchSizePerCPU)
+	fmt.Println("Total number of CID items: ", len(cids))
+	batches := splitIntoBatches(cids, batchSizePerCPU)
+
+	// Process each batch sequentially
+	for _, batch := range batches {
+		fmt.Printf("Processing batch of %d CIDs\n", len(batch))
+		// Launch goroutines
+		for _, cidItem := range batch {
+			wg.Add(1)
+			// Create a progress bar for each CID
+			bar := pb.New64(0) // Start with 0 bytes
+			//bar.SetTemplateString(`{{string . "prefix"}}{{counters . }}{{bar . }} {{percent . }} ({{speed . "%sB/s"}})`)
+			bar.Start()
+			bars[cidItem] = bar
+			go fetchCID(cidItem, node, results, &wg, sem, bars[cidItem])
+		}
+
+		// Wait for all goroutines in the current batch to finish
+		wg.Wait()
+
+		// Close the progress bars for the current batch
+		for _, cidItem := range batch {
+			bars[cidItem].Finish()
+		}
 	}
 
-	// Wait for all goroutines to finish
-	wg.Wait()
 	close(results)
 
 	// Collect errors from the results channel
@@ -117,7 +139,18 @@ func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.
 
 	results <- errF
 }
-
+func splitIntoBatches(cids []string, batchSize int) [][]string {
+	var batches [][]string
+	for i := 0; i < len(cids); i += batchSize {
+		end := i + batchSize
+		if end > len(cids) {
+			end = len(cids)
+		}
+		batch := cids[i:end]
+		batches = append(batches, batch)
+	}
+	return batches
+}
 func NewEdgeNode(ctx context.Context, repo string) (*whypfs.Node, error) {
 
 	// node
