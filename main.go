@@ -184,14 +184,19 @@ func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.
 		<-sem
 	}()
 
-	fmt.Println("Fetching CID: ", cidItem)
 	cidD, err := cid.Decode(cidItem)
 	if err != nil {
 		results <- fmt.Errorf("Error decoding cid: %s", err)
 		return
 	}
+	fmt.Print("Fetching CID: ", cidItem)
 	nd, errF := node.Get(context.Background(), cidD)
-	fmt.Print(nd.Size())
+	ndSize, errS := nd.Size()
+	if errS != nil {
+		results <- fmt.Errorf("error getting cid: %s", errS)
+		return
+	}
+	fmt.Println("Size: ", ndSize)
 	if errF != nil {
 		results <- fmt.Errorf("error getting cid: %s", err)
 	}
