@@ -196,7 +196,7 @@ func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.
 		results <- fmt.Errorf("error getting cid: %s", errS)
 		return
 	}
-	fmt.Println("Size: ", ndSize)
+	fmt.Println(" Size: ", ndSize)
 	if errF != nil {
 		results <- fmt.Errorf("error getting cid: %s", err)
 	}
