@@ -66,45 +66,41 @@ func main() {
 	// Create a channel to receive errors from goroutines
 	results := make(chan error)
 
-	// Create a WaitGroup to wait for all goroutines to finish
-	var wg sync.WaitGroup
+	// Create a WaitGroup to wait for all batches to finish
+	var allBatchesWG sync.WaitGroup
+	allBatchesWG.Add(len(cids) / batchSizePerCPU)
 
 	// Create a semaphore channel to limit the number of goroutines
 	sem := make(chan struct{}, concurrentLimit)
 
-	// Create a map to store the progress bars for each CID
-	bars := make(map[string]*pb.ProgressBar)
-
 	// Divide the CIDs into batches
-	fmt.Println("Dividing CIDs into batches")
-	fmt.Println("Batch size per CPU: ", batchSizePerCPU)
-	fmt.Println("Total number of batches: ", len(cids)/batchSizePerCPU)
-	fmt.Println("Total number of CID items: ", len(cids))
 	batches := splitIntoBatches(cids, batchSizePerCPU)
 
 	// Process each batch sequentially
 	for _, batch := range batches {
 		fmt.Printf("Processing batch of %d CIDs\n", len(batch))
-		// Launch goroutines
-		for _, cidItem := range batch {
-			wg.Add(1)
-			// Create a progress bar for each CID
-			bar := pb.New64(0) // Start with 0 bytes
-			//bar.SetTemplateString(`{{string . "prefix"}}{{counters . }}{{bar . }} {{percent . }} ({{speed . "%sB/s"}})`)
-			bar.Start()
-			bars[cidItem] = bar
-			go fetchCID(cidItem, node, results, &wg, sem, bars[cidItem])
-		}
 
-		// Wait for all goroutines in the current batch to finish
+		// Create a map to store the progress bars for each CID in the current batch
+		bars := make(map[string]*pb.ProgressBar)
+
+		// Create a WaitGroup to wait for all goroutines in the current batch to finish
+		var wg sync.WaitGroup
+
+		// Launch goroutines
+		wg.Add(len(batch))
+		for _, cidItem := range batch {
+			go fetchCID(cidItem, node, results, &wg, sem, bars[cidItem])
+			<-results
+		}
 		wg.Wait()
 
-		// Close the progress bars for the current batch
-		for _, cidItem := range batch {
-			bars[cidItem].Finish()
-		}
+		////<-sem // Wait for a free slot in the semaphore channel
+		//allBatchesWG.Done()
+		fmt.Println("Finished processing batch")
 	}
 
+	// Wait for all batches to finish before closing the results channel
+	allBatchesWG.Wait()
 	close(results)
 
 	// Collect errors from the results channel
@@ -113,6 +109,8 @@ func main() {
 			fmt.Printf("Error fetching CID: %s\n", err)
 		}
 	}
+
+	return
 }
 
 func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.WaitGroup, sem chan struct{}, bar *pb.ProgressBar) {
@@ -133,12 +131,11 @@ func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.
 	}
 
 	_, errF := node.Get(context.Background(), cidD)
-
-	// Increment the progress bar
-	bar.Increment()
-
 	results <- errF
+	return
 }
+
+// splitIntoBatches splits the list of CIDs into batches of the specified batch size.
 func splitIntoBatches(cids []string, batchSize int) [][]string {
 	var batches [][]string
 	for i := 0; i < len(cids); i += batchSize {
@@ -151,6 +148,7 @@ func splitIntoBatches(cids []string, batchSize int) [][]string {
 	}
 	return batches
 }
+
 func NewEdgeNode(ctx context.Context, repo string) (*whypfs.Node, error) {
 
 	// node
