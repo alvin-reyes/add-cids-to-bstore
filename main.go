@@ -130,7 +130,7 @@ func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.
 		return
 	}
 
-	_, errF := node.Get(context.Background(), cidD)
+	_, errF := node.Blockstore.Get(context.Background(), cidD)
 	results <- errF
 	return
 }
