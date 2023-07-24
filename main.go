@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/application-research/whypfs-core"
@@ -9,19 +10,49 @@ import (
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	dsync "github.com/ipfs/go-datastore/sync"
+	ipld "github.com/ipfs/go-ipld-format"
+	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
+	"github.com/multiformats/go-multihash"
 	"io/ioutil"
 	"net/http"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 const baseURL = "https://bafybeifcghbafml4yrk43m3pvplin4auibnwrdv5v3rnwnovjjpkt6tkju.ipfs.dweb.link/"
 
+type Peer struct {
+	ID    string
+	Addrs []string
+}
+
+// /
+// /[
+//
+//	  {
+//	    "ID": "12D3KooWB5HcweB1wdgK8bjfTRHcZdvMFd6ffrn6XqMMyUG7pakP",
+//	    "Addrs": ["/dns/bacalhau.dokterbob.net/tcp/4001", "/dns/bacalhau.dokterbob.net/udp/4001/quic"]
+//	  }
+//	]
+//
+// /
 func main() {
 
 	repo := flag.String("repo", "./whypfs", "path to the repo")
 	cidsUrlSource := flag.String("cids-url-source", baseURL, "URL to fetch cids.txt from")
+	peers := flag.String("peers", "[{\"ID\":\"12D3KooWB5HcweB1wdgK8bjfTRHcZdvMFd6ffrn6XqMMyUG7pakP\",\"Addrs\":[\"/dns/bacalhau.dokterbob.net/tcp/4001\",\"/dns/bacalhau.dokterbob.net/udp/4001/quic\"]}]", "comma-separated list of peers to connect to")
+
+	// unmarshal the peers string to an array of Peer structs
+	peerList := make([]Peer, 0)
+	err := json.Unmarshal([]byte(*peers), &peerList)
+	if err != nil {
+		fmt.Printf("An error occurred while parsing the peers string: %s\n", err)
+		return
+	}
 
 	// Parse the command-line flags.
 	flag.Parse()
@@ -52,6 +83,36 @@ func main() {
 		fmt.Printf("Error occurred while creating a new node: %s\n", err)
 		return
 	}
+
+	// for each peerList, convert it to peer.AddrInfo
+	var peerInfos []peer.AddrInfo
+	for _, peerItem := range peerList {
+		// create peer id
+		peerId, err := peer.Decode(peerItem.ID)
+		if err != nil {
+			fmt.Printf("Error occurred while decoding peer ID: %s\n", err)
+			return
+		}
+		// create multiaddr array
+		var multiAddrs []multiaddr.Multiaddr
+		for _, addr := range peerItem.Addrs {
+			multiAddr, err := multiaddr.NewMultiaddr(addr)
+			if err != nil {
+				fmt.Printf("Error occurred while creating multiaddr: %s\n", err)
+				return
+			}
+			multiAddrs = append(multiAddrs, multiAddr)
+		}
+
+		peerInfo := peer.AddrInfo{
+			ID:    peerId,
+			Addrs: multiAddrs,
+		}
+		peerInfos = append(peerInfos, peerInfo)
+	}
+
+	// connect
+	ConnectToDelegates(context.Background(), *node, peerInfos)
 
 	fmt.Println("List of CIDs:")
 	// Number of concurrent goroutines based on the number of CPUs available
@@ -95,7 +156,7 @@ func main() {
 		wg.Wait()
 
 		////<-sem // Wait for a free slot in the semaphore channel
-		//allBatchesWG.Done()
+		allBatchesWG.Done()
 		fmt.Println("Finished processing batch")
 	}
 
@@ -129,10 +190,58 @@ func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.
 		results <- fmt.Errorf("Error decoding cid: %s", err)
 		return
 	}
+	nd, errF := node.Get(context.Background(), cidD)
+	fmt.Print(nd.Size())
+	if errF != nil {
+		results <- fmt.Errorf("error getting cid: %s", err)
+	}
+	//dserv := merkledag.NewDAGService(node.Blockservice)
+	//cset := cid.NewSet()
+	//errW := merkledag.Walk(context.Background(), func(ctx context.Context, c cid.Cid) ([]*ipld.Link, error) {
+	//	nodeS, err := dserv.Get(ctx, c)
+	//	if err != nil {
+	//		return nil, err
+	//	}
+	//
+	//	if c.Type() == cid.Raw {
+	//		return nil, nil
+	//	}
+	//
+	//	fmt.Println(nodeS.RawData())
+	//	return FilterUnwalkableLinks(nodeS.Links()), nil
+	//}, cidD, cset.Visit, merkledag.Concurrent())
+	//
+	//if errW != nil {
+	//	results <- fmt.Errorf("error getting cid: %s", err)
+	//}
 
-	_, errF := node.DAGService.Get(context.Background(), cidD)
-	results <- errF
-	return
+	results <- nil
+}
+
+func FilterUnwalkableLinks(links []*ipld.Link) []*ipld.Link {
+	out := make([]*ipld.Link, 0, len(links))
+
+	for _, l := range links {
+		if CidIsUnwalkable(l.Cid) {
+			continue
+		}
+		out = append(out, l)
+	}
+
+	return out
+}
+
+func CidIsUnwalkable(c cid.Cid) bool {
+	pref := c.Prefix()
+	if pref.MhType == multihash.IDENTITY {
+		return true
+	}
+
+	if pref.Codec == cid.FilCommitmentSealed || pref.Codec == cid.FilCommitmentUnsealed {
+		return true
+	}
+
+	return false
 }
 
 // splitIntoBatches splits the list of CIDs into batches of the specified batch size.
@@ -198,4 +307,23 @@ func GetPublicIP() (string, error) {
 		return "", err
 	}
 	return string(body), nil
+}
+
+func ConnectToDelegates(ctx context.Context, node whypfs.Node, peerInfos []peer.AddrInfo) error {
+
+	for _, peerInfo := range peerInfos {
+		node.Host.Peerstore().AddAddrs(peerInfo.ID, peerInfo.Addrs, time.Hour)
+
+		if node.Host.Network().Connectedness(peerInfo.ID) != network.Connected {
+			if err := node.Host.Connect(ctx, peer.AddrInfo{
+				ID: peerInfo.ID,
+			}); err != nil {
+				return err
+			}
+
+			node.Host.ConnManager().Protect(peerInfo.ID, "pinning")
+		}
+	}
+
+	return nil
 }
