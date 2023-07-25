@@ -1,20 +1,29 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/application-research/whypfs-core"
 	"github.com/cheggaaa/pb/v3"
+	commcid "github.com/filecoin-project/go-fil-commcid"
+	commp "github.com/filecoin-project/go-fil-commp-hashhash"
+	"github.com/filecoin-project/go-fil-markets/shared"
+	"github.com/filecoin-project/go-state-types/abi"
+	"github.com/ipfs/boxo/blockstore"
+	"github.com/ipfs/boxo/ipld/car"
+	"github.com/ipfs/boxo/ipld/merkledag"
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-datastore"
 	dsync "github.com/ipfs/go-datastore/sync"
-	ipld "github.com/ipfs/go-ipld-format"
+	uio "github.com/ipfs/go-unixfs/io"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/multiformats/go-multihash"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"runtime"
@@ -30,16 +39,8 @@ type Peer struct {
 	Addrs []string
 }
 
-// /
-// /[
-//
-//	  {
-//	    "ID": "12D3KooWB5HcweB1wdgK8bjfTRHcZdvMFd6ffrn6XqMMyUG7pakP",
-//	    "Addrs": ["/dns/bacalhau.dokterbob.net/tcp/4001", "/dns/bacalhau.dokterbob.net/udp/4001/quic"]
-//	  }
-//	]
-//
-// /
+var node *whypfs.Node
+
 func main() {
 
 	repo := flag.String("repo", "./whypfs", "path to the repo")
@@ -78,11 +79,12 @@ func main() {
 	cidsStr := string(cidsBytes)
 	cids := strings.Split(strings.TrimSpace(cidsStr), "\n")
 
-	node, err := NewEdgeNode(context.Background(), *repo)
+	nodeW, err := NewEdgeNode(context.Background(), *repo)
 	if err != nil {
 		fmt.Printf("Error occurred while creating a new node: %s\n", err)
 		return
 	}
+	node = nodeW
 
 	// for each peerList, convert it to peer.AddrInfo
 	var peerInfos []peer.AddrInfo
@@ -137,6 +139,10 @@ func main() {
 	// Divide the CIDs into batches
 	batches := splitIntoBatches(cids, batchSizePerCPU)
 
+	bucket := &CIDBucket{
+		maxSize: 4 * 1024 * 1024, // 4 MB
+	}
+
 	// Process each batch sequentially
 	for _, batch := range batches {
 		fmt.Printf("Processing batch of %d CIDs\n", len(batch))
@@ -150,7 +156,7 @@ func main() {
 		// Launch goroutines
 		wg.Add(len(batch))
 		for _, cidItem := range batch {
-			go fetchCID(cidItem, node, results, &wg, sem, bars[cidItem])
+			go fetchCID(cidItem, node, results, &wg, sem, bars[cidItem], *bucket)
 			<-results
 		}
 		wg.Wait()
@@ -174,7 +180,131 @@ func main() {
 	return
 }
 
-func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.WaitGroup, sem chan struct{}, bar *pb.ProgressBar) {
+type CIDBucket struct {
+	mu      sync.Mutex
+	cids    []string
+	size    int64
+	maxSize int64 // The maximum size of the bucket in bytes (4GB in this case)
+}
+
+// GetCidBuilderDefault is a helper function that returns a default cid builder
+func GetCidBuilderDefault() cid.Builder {
+	cidBuilder, err := merkledag.PrefixForCidVersion(1)
+	if err != nil {
+		panic(err)
+	}
+	cidBuilder.MhType = uint64(multihash.SHA2_256)
+	cidBuilder.MhLength = -1
+	return cidBuilder
+}
+
+func (bucket *CIDBucket) addCID(cidS string, size int64) {
+	bucket.mu.Lock()
+	defer bucket.mu.Unlock()
+
+	// Check if adding this CID exceeds the maximum size
+	if bucket.size+size > bucket.maxSize {
+
+		// car the bucket
+		// for each content, generate a node and a raw
+		dir := uio.NewDirectory(node.DAGService)
+		dir.SetCidBuilder(GetCidBuilderDefault())
+		buf := new(bytes.Buffer)
+		fmt.Println(len(bucket.cids))
+		for _, cAgg := range bucket.cids {
+			cCidAgg, err := cid.Decode(cAgg)
+			if err != nil {
+				return
+			}
+
+			cDataAgg, errCData := node.Get(context.Background(), cCidAgg) // get the node
+			if errCData != nil {
+				return
+			}
+
+			_, err = io.Copy(buf, bytes.NewReader(cDataAgg.RawData()))
+			dir.AddChild(context.Background(), cAgg, cDataAgg)
+		}
+
+		dirNode, err := dir.GetNode()
+		if err != nil {
+			return
+		}
+		node.Blockstore.Put(context.Background(), dirNode)
+		if err != nil {
+			return
+		}
+
+		pieceCid, carSize, unpaddedPieceSize, bufFile, err := GeneratePieceCommitment(context.Background(), dirNode.Cid(), node.Blockstore)
+		bufFileN, err := node.AddPinFile(context.Background(), &bufFile, nil)
+
+		fmt.Println("Piece CID: ", pieceCid)
+		fmt.Println("CAR size: ", carSize)
+		fmt.Println("Unpadded piece size: ", unpaddedPieceSize)
+		fmt.Println("File size: ", bufFile.Len())
+		fmt.Println("Car Cid", bufFileN.Cid())
+
+		// Reset the bucket
+		bucket.cids = []string{}
+		bucket.size = 0
+	}
+
+	bucket.cids = append(bucket.cids, cidS)
+	bucket.size += size
+}
+
+const maxTraversalLinks = 32 * (1 << 20)
+
+func GeneratePieceCommitment(ctx context.Context, payloadCid cid.Cid, bstore blockstore.Blockstore) (cid.Cid, uint64, abi.UnpaddedPieceSize, bytes.Buffer, error) {
+	selectiveCar := car.NewSelectiveCar(
+		context.Background(),
+		bstore,
+		[]car.Dag{{Root: payloadCid, Selector: shared.AllSelector()}},
+		car.MaxTraversalLinks(maxTraversalLinks),
+		car.TraverseLinksOnlyOnce(),
+	)
+
+	buf := new(bytes.Buffer)
+	blockCount := 0
+	var oneStepBlocks []car.Block
+	err := selectiveCar.Write(buf, func(block car.Block) error {
+		oneStepBlocks = append(oneStepBlocks, block)
+		blockCount++
+		return nil
+	})
+	if err != nil {
+		return cid.Undef, 0, 0, *buf, err
+	}
+
+	preparedCar, err := selectiveCar.Prepare()
+	if err != nil {
+		return cid.Undef, 0, 0, *buf, err
+	}
+
+	writer := new(commp.Calc)
+	carWriter := &bytes.Buffer{}
+	err = preparedCar.Dump(ctx, writer)
+	if err != nil {
+		return cid.Undef, 0, 0, *buf, err
+	}
+	commpc, size, err := writer.Digest()
+	if err != nil {
+		return cid.Undef, 0, 0, *buf, err
+	}
+	err = preparedCar.Dump(ctx, carWriter)
+	if err != nil {
+		return cid.Undef, 0, 0, *buf, err
+	}
+
+	commCid, err := commcid.DataCommitmentV1ToCID(commpc)
+	if err != nil {
+		return cid.Undef, 0, 0, *buf, err
+	}
+
+	return commCid, preparedCar.Size(), abi.PaddedPieceSize(size).Unpadded(), *buf, nil
+}
+
+func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.WaitGroup, sem chan struct{}, bar *pb.ProgressBar, bucket CIDBucket) {
 	defer wg.Done()
 
 	// Acquire the semaphore, this will block if the semaphore is full
@@ -191,62 +321,17 @@ func fetchCID(cidItem string, node *whypfs.Node, results chan<- error, wg *sync.
 	}
 	fmt.Print("Fetching CID: ", cidItem)
 	nd, errF := node.Get(context.Background(), cidD)
+	if errF != nil {
+		results <- fmt.Errorf("error getting cid: %s", err)
+	}
 	ndSize, errS := nd.Size()
 	if errS != nil {
 		results <- fmt.Errorf("error getting cid: %s", errS)
 		return
 	}
 	fmt.Println(" Size: ", ndSize)
-	if errF != nil {
-		results <- fmt.Errorf("error getting cid: %s", err)
-	}
-	//dserv := merkledag.NewDAGService(node.Blockservice)
-	//cset := cid.NewSet()
-	//errW := merkledag.Walk(context.Background(), func(ctx context.Context, c cid.Cid) ([]*ipld.Link, error) {
-	//	nodeS, err := dserv.Get(ctx, c)
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//
-	//	if c.Type() == cid.Raw {
-	//		return nil, nil
-	//	}
-	//
-	//	fmt.Println(nodeS.RawData())
-	//	return FilterUnwalkableLinks(nodeS.Links()), nil
-	//}, cidD, cset.Visit, merkledag.Concurrent())
-	//
-	//if errW != nil {
-	//	results <- fmt.Errorf("error getting cid: %s", err)
-	//}
-
 	results <- nil
-}
-
-func FilterUnwalkableLinks(links []*ipld.Link) []*ipld.Link {
-	out := make([]*ipld.Link, 0, len(links))
-
-	for _, l := range links {
-		if CidIsUnwalkable(l.Cid) {
-			continue
-		}
-		out = append(out, l)
-	}
-
-	return out
-}
-
-func CidIsUnwalkable(c cid.Cid) bool {
-	pref := c.Prefix()
-	if pref.MhType == multihash.IDENTITY {
-		return true
-	}
-
-	if pref.Codec == cid.FilCommitmentSealed || pref.Codec == cid.FilCommitmentUnsealed {
-		return true
-	}
-
-	return false
+	bucket.addCID(cidItem, int64(ndSize))
 }
 
 // splitIntoBatches splits the list of CIDs into batches of the specified batch size.
